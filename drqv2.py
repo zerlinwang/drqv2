@@ -174,6 +174,35 @@ class DrQV2Agent:
                 action.uniform_(-1.0, 1.0)
         return action.cpu().numpy()[0]
 
+    # def update_critic(self, obs, action, reward, discount, next_obs, step):
+    #     metrics = dict()
+
+    #     with torch.no_grad():
+    #         stddev = utils.schedule(self.stddev_schedule, step)
+    #         dist = self.actor(next_obs, stddev)
+    #         next_action = dist.sample(clip=self.stddev_clip)
+    #         target_Q1, target_Q2 = self.critic_target(next_obs, next_action)
+    #         target_V = torch.min(target_Q1, target_Q2)
+    #         target_Q = reward + (discount * target_V)
+
+    #     Q1, Q2 = self.critic(obs, action)
+    #     critic_loss = F.mse_loss(Q1, target_Q) + F.mse_loss(Q2, target_Q)
+
+    #     if self.use_tb:
+    #         metrics['critic_target_q'] = target_Q.mean().item()
+    #         metrics['critic_q1'] = Q1.mean().item()
+    #         metrics['critic_q2'] = Q2.mean().item()
+    #         metrics['critic_loss'] = critic_loss.item()
+
+    #     # optimize encoder and critic
+    #     self.encoder_opt.zero_grad(set_to_none=True)
+    #     self.critic_opt.zero_grad(set_to_none=True)
+    #     critic_loss.backward()
+    #     self.critic_opt.step()
+    #     self.encoder_opt.step()
+
+    #     return metrics    
+    
     def update_critic(self, obs, action, reward, discount, next_obs, step):
         metrics = dict()
 
@@ -195,10 +224,39 @@ class DrQV2Agent:
             metrics['critic_loss'] = critic_loss.item()
 
         # optimize encoder and critic
-        self.encoder_opt.zero_grad(set_to_none=True)
+        # self.encoder_opt.zero_grad(set_to_none=True)
         self.critic_opt.zero_grad(set_to_none=True)
         critic_loss.backward()
         self.critic_opt.step()
+        # self.encoder_opt.step()
+
+        return metrics
+    
+    def update_encoder(self, obs, action, reward, discount, next_obs, step):
+        metrics = dict()
+
+        with torch.no_grad():
+            stddev = utils.schedule(self.stddev_schedule, step)
+            dist = self.actor(next_obs, stddev)
+            next_action = dist.sample(clip=self.stddev_clip)
+            target_Q1, target_Q2 = self.critic_target(next_obs, next_action)
+            target_V = torch.min(target_Q1, target_Q2)
+            target_Q = reward + (discount * target_V)
+
+        Q1, Q2 = self.critic(obs, action)
+        critic_loss = F.mse_loss(Q1, target_Q) + F.mse_loss(Q2, target_Q)
+
+        if self.use_tb:
+            metrics['aug_critic_target_q'] = target_Q.mean().item()
+            metrics['aug_critic_q1'] = Q1.mean().item()
+            metrics['aug_critic_q2'] = Q2.mean().item()
+            metrics['aug_critic_loss'] = critic_loss.item()
+
+        # optimize encoder and critic
+        self.encoder_opt.zero_grad(set_to_none=True)
+        # self.critic_opt.zero_grad(set_to_none=True)
+        critic_loss.backward()
+        # self.critic_opt.step()
         self.encoder_opt.step()
 
         return metrics
@@ -236,10 +294,12 @@ class DrQV2Agent:
         batch = next(replay_iter)
         obs, action, reward, discount, next_obs = utils.to_torch(
             batch, self.device)
-
+        
         # augment
-        obs = self.aug(obs.float())
-        next_obs = self.aug(next_obs.float())
+        aug_obs = self.encoder(self.aug(obs.float()))
+        with torch.no_grad():
+            aug_next_obs = self.encoder(self.aug(next_obs.float()))
+
         # encode
         obs = self.encoder(obs)
         with torch.no_grad():
@@ -251,6 +311,11 @@ class DrQV2Agent:
         # update critic
         metrics.update(
             self.update_critic(obs, action, reward, discount, next_obs, step))
+        
+        # update encoder
+        metrics.update(
+            self.update_encoder(aug_obs, action, reward, discount, aug_next_obs, step)
+        )
 
         # update actor
         metrics.update(self.update_actor(obs.detach(), step))
